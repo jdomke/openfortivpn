@@ -1,3 +1,9 @@
+Changes in this fork:
+=====================
+our vpn answered the POST requests with 405 errors, changing to GET resolved
+the issue
+
+
 openfortivpn
 ============
 

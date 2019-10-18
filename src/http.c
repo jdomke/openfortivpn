@@ -572,12 +572,11 @@ int auth_log_in(struct tunnel *tunnel)
 
 	tunnel->cookie[0] = '\0';
 
-	snprintf(data, sizeof(data), "username=%s&credential=%s&realm=%s&ajax=1"
-	         "&redir=%%2Fremote%%2Findex&just_logged_in=1",
-	         username, password, realm);
+	snprintf(data, sizeof(data), "username=%s&credential=%s",
+	         username, password);
 
 	ret = http_request(
-	              tunnel, "POST", "/remote/logincheck", data, &res, &response_size);
+	              tunnel, "GET", "/remote/logincheck", data, &res, &response_size);
 	if (ret != 1)
 		goto end;
 
