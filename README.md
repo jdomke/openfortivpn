@@ -2,6 +2,9 @@ Changes in this fork:
 =====================
 our vpn answered the POST requests with 405 errors, changing to GET resolved
 the issue
+```
+./autogen.sh ; CFLAGS="-march=native -O2" ./configure --exec-prefix=/usr --sysconfdir=/etc ; make clean ; make
+```
 
 
 openfortivpn
