@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.63])
-AC_INIT([openfortivpn], [1.11.0])
+AC_INIT([openfortivpn], [1.12.0])
 AC_CONFIG_SRCDIR([src/main.c])
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 
@@ -226,20 +226,19 @@ AC_ARG_WITH([rt_dst],
 	])
 )
 AS_IF([test "x$with_rt_dst" = "x" ], [
-AC_MSG_CHECKING(whether rtentry is available and has rt_dst )
-AC_TRY_RUN([
+AC_MSG_CHECKING(whether rtentry is available and has rt_dst)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <net/route.h>
 static inline struct sockaddr_in *cast_addr(struct sockaddr *addr)
 {
-       return (struct sockaddr_in *) addr;
+  return (struct sockaddr_in *) addr;
 }
+],[
 struct rtentry route;
-int main() {
-  cast_addr(&(&route)->rt_dst)->sin_family = AF_INET;
-  return (cast_addr(&(&route)->rt_dst)->sin_family == AF_INET) ? 0 : 1; }
-], [
+cast_addr(&(&route)->rt_dst)->sin_family = AF_INET;
+])],[
   AC_DEFINE(HAVE_RT_ENTRY_WITH_RT_DST)
   AC_MSG_RESULT(yes)
 ], AC_MSG_RESULT(no) )
@@ -247,6 +246,7 @@ int main() {
 
 NETSTAT_PATH=""
 PPP_PATH=""
+RESOLVCONF_PATH=""
 
 # prepare possibility to override default locations
 AC_ARG_WITH([netstat],
@@ -273,6 +273,12 @@ AC_ARG_WITH([ppp],
 		with_ppp="yes"
 		with_pppd="no"
 	])
+)
+# resolvconf if present
+AC_ARG_WITH([resolvconf],
+        AS_HELP_STRING([--with-resolvconf],
+                       [Set the path to the resolvconf executable]),
+        RESOLVCONF_PATH="$withval"
 )
 
 # override for /proc/net/route detection
@@ -350,6 +356,8 @@ AS_IF([test "x$with_ppp" = "xyes" -a "x$with_pppd" = "xyes"], [
    with_ppp="no"
 ])
 
+AC_PATH_PROG(RESOLVCONF_PATH, [resolvconf], [/sbin/resolvconf], "$PATH:/sbin:/usr/sbin")
+
 AS_IF([test "x$with_ppp" = "xyes"], [
 	AC_DEFINE(HAVE_USR_SBIN_PPP, 1)
 	AC_MSG_NOTICE([HAVE_USR_SBIN_PPP... 1])
@@ -378,6 +386,11 @@ AC_MSG_NOTICE([PPP_PATH...] $PPP_PATH)
 AC_SUBST(NETSTAT_PATH)
 AS_IF([test "x$NETSTAT_PATH" != "x" ], [
     AC_MSG_NOTICE([NETSTAT_PATH...] $NETSTAT_PATH)
+])
+
+AC_SUBST(RESOLVCONF_PATH)
+AS_IF([test "x$RESOLVCONF_PATH" != "x" ], [
+    AC_MSG_NOTICE([RESOLVCONF_PATH...] $RESOLVCONF_PATH)
 ])
 
 AC_CONFIG_COMMANDS([timestamp], [touch src/.dirstamp])

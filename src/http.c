@@ -76,16 +76,20 @@ int http_send(struct tunnel *tunnel, const char *request, ...)
 	va_start(args, request);
 	length = vsnprintf(buffer, BUFSZ, request, args);
 	va_end(args);
-	strcpy(logbuffer,buffer);
-	if (loglevel <= OFV_LOG_DEBUG_DETAILS && tunnel->config->password[0]!='\0') {
-		char* pwstart;
-		pwstart = strstr(logbuffer, tunnel->config->password);
+	strcpy(logbuffer, buffer);
+	if (loglevel <= OFV_LOG_DEBUG_DETAILS && tunnel->config->password[0] != '\0') {
+		char *pwstart;
+		char password[3 * FIELD_SIZE + 1];
+
+		url_encode(password, tunnel->config->password);
+		pwstart = strstr(logbuffer, password);
+
 		if (pwstart != NULL) {
 			int pos, pwlen, i;
 			pos = pwstart - logbuffer;
 			pwlen = strlen(tunnel->config->password);
-			for (i=pos; i<pos+pwlen; i++)
-				logbuffer[i]='*';
+			for (i = pos; i < pos + pwlen; i++)
+				logbuffer[i] = '*';
 		}
 	}
 
@@ -94,7 +98,7 @@ int http_send(struct tunnel *tunnel, const char *request, ...)
 	else if (length >= BUFSZ)
 		return ERR_HTTP_TOO_LONG;
 
-	log_debug_details("%s: \n%s\n", __func__, logbuffer);
+	log_debug_details("%s:\n%s\n", __func__, logbuffer);
 
 	while (n == 0)
 		n = safe_ssl_write(tunnel->ssl_handle, (uint8_t *) buffer,
@@ -162,7 +166,7 @@ int http_receive(
 		                  (uint8_t *) buffer + bytes_read,
 		                  BUFSZ - 1 - bytes_read);
 		if (n > 0) {
-			log_debug_details("%s: \n%s\n", __func__, buffer);
+			log_debug_details("%s:\n%s\n", __func__, buffer);
 			const char *eoh;
 
 			bytes_read += n;
@@ -287,15 +291,13 @@ static int http_request(struct tunnel *tunnel, const char *method,
                         uint32_t *response_size
                        )
 {
-	int ret = do_http_request(
-	                  tunnel, method, uri, data, response, response_size);
+	int ret = do_http_request(tunnel, method, uri, data,
+	                          response, response_size);
 
 	if (ret == ERR_HTTP_SSL) {
 		ssl_connect(tunnel);
-		ret = do_http_request(
-		              tunnel, method, uri, data, response,
-		              response_size
-		      );
+		ret = do_http_request(tunnel, method, uri, data,
+		                      response, response_size);
 	}
 
 	if (ret != 1)
@@ -573,32 +575,29 @@ int auth_log_in(struct tunnel *tunnel)
 
 	tunnel->cookie[0] = '\0';
 
-/*	snprintf(data, sizeof(data), "username=%s&credential=%s",
-	         username, password);
-
-	ret = http_request(
-	              tunnel, "GET", "/remote/logincheck", data, &res, &response_size);
-*/
-	if (tunnel->config->use_engine) {
+	if (tunnel->config->use_engine
+	    || (username[0] == '\0' && tunnel->config->password[0] == '\0')) {
 		snprintf(data, sizeof(data), "cert=&nup=1");
 		ret = http_request(tunnel, "GET", "/remote/login",
 		                   data, &res, &response_size);
 	} else {
-		if (tunnel->config->password == '\0') {
-			snprintf(data, sizeof(data), "username=%s&realm=%s&ajax=1"
-			         "&redir=%%2Fremote%%2Findex&just_logged_in=1",
+		if (tunnel->config->password[0] == '\0') {
+			snprintf(data, sizeof(data),
+			         "username=%s&realm=%s&ajax=1&redir=%%2Fremote%%2Findex&just_logged_in=1",
 			         username, realm);
 		} else {
 			url_encode(password, tunnel->config->password);
-			snprintf(data, sizeof(data), "username=%s&credential=%s&realm=%s&ajax=1"
-			         "&redir=%%2Fremote%%2Findex&just_logged_in=1",
+			snprintf(data, sizeof(data),
+			         "username=%s&credential=%s&realm=%s&ajax=1&redir=%%2Fremote%%2Findex&just_logged_in=1",
 			         username, password, realm);
 		}
-/*		ret = http_request(tunnel, "POST", "/remote/logincheck",
-		                   data, &res, &response_size);
-*/
-		ret = http_request(tunnel, "GET", "/remote/logincheck",
-		                   data, &res, &response_size);
+		if (strncmp(tunnel->config->gateway_host, "vpn02.r-ccs", 11) == 0) {
+			ret = http_request(tunnel, "GET", "/remote/logincheck",
+			                   data, &res, &response_size);
+		} else {
+			ret = http_request(tunnel, "POST", "/remote/logincheck",
+			                   data, &res, &response_size);
+		}
 	}
 
 	if (ret != 1)
@@ -659,9 +658,8 @@ int auth_log_in(struct tunnel *tunnel)
 		}
 
 		url_encode(tokenresponse, cfg->otp);
-		snprintf(data, sizeof(data), "username=%s&realm=%s&reqid=%s"
-		         "&polid=%s&grp=%s&code=%s&code2="
-		         "&redir=%%2Fremote%%2Findex&just_logged_in=1",
+		snprintf(data, sizeof(data),
+		         "username=%s&realm=%s&reqid=%s&polid=%s&grp=%s&code=%s&code2=&redir=%%2Fremote%%2Findex&just_logged_in=1",
 		         username, realm, reqid, polid, group, tokenresponse);
 
 		delay_otp(tunnel);
@@ -731,7 +729,7 @@ static int parse_xml_config(struct tunnel *tunnel, const char *buffer)
 		if (xml_find(' ', "domain=", val, 1)) {
 			tunnel->ipv4.dns_suffix
 			        = xml_get(xml_find(' ', "domain=", val, 1));
-			log_debug("found dns suffix %s in xml config",
+			log_debug("found dns suffix %s in xml config\n",
 			          tunnel->ipv4.dns_suffix);
 			break;
 		}
@@ -742,7 +740,7 @@ static int parse_xml_config(struct tunnel *tunnel, const char *buffer)
 	while ((val = xml_find('<', "dns", val, 2))) {
 		if (xml_find(' ', "ip=", val, 1)) {
 			dns_server = xml_get(xml_find(' ', "ip=", val, 1));
-			log_debug("found dns server %s in xml config", dns_server);
+			log_debug("found dns server %s in xml config\n", dns_server);
 			if (!tunnel->ipv4.ns1_addr.s_addr)
 				tunnel->ipv4.ns1_addr.s_addr = inet_addr(dns_server);
 			else if (!tunnel->ipv4.ns2_addr.s_addr)

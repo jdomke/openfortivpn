@@ -196,7 +196,7 @@ cleanup:
 	}
 
 #else
-	FILE *fp;
+	FILE * fp;
 	uint32_t total_bytes_read = 0;
 
 	char *saveptr3 = NULL;
@@ -317,7 +317,7 @@ cleanup:
 #ifdef RTF_STATIC     // Manually added
 	flag_table['S'] = RTF_STATIC & USHRT_MAX;
 #endif
-#ifdef RTF_UP         // Route usable
+#ifdef RTF_UP	 // Route usable
 	flag_table['U'] = RTF_UP & USHRT_MAX;
 #endif
 #ifdef RTF_WASCLONED  // Route was generated as a result of cloning
@@ -576,7 +576,7 @@ end:
 	if (err)
 		return err;
 
-	if (rtfound==0) {
+	if (rtfound == 0) {
 		// should not occur anymore unless there is no default route
 		log_debug("Route not found.\n");
 		// at least restore input values
@@ -741,7 +741,7 @@ int ipv4_protect_tunnel_route(struct tunnel *tunnel)
 		log_debug("ip route show %s\n", ipv4_show_route(gtw_rt));
 		ipv4_del_route(gtw_rt);
 	}
-	sprintf(route_iface(gtw_rt),"!%s",tunnel->ppp_iface);
+	sprintf(route_iface(gtw_rt), "!%s", tunnel->ppp_iface);
 	ret = ipv4_get_route(gtw_rt);
 	if (ret != 0) {
 		log_warn("Could not get route to gateway (%s).\n",
@@ -779,8 +779,8 @@ static void add_text_route(struct tunnel *tunnel, const char *dest,
                            const char *mask, const char *gw)
 {
 	size_t l0, l1;
-	const char fmt[] = ",%s/%s/%s";
-	const char trigger[] = "openfortivpn";
+	static const char fmt[] = ",%s/%s/%s";
+	static const char trigger[] = "openfortivpn";
 	char **target = &tunnel->config->pppd_ipparam;
 	char *ptr;
 
@@ -791,7 +791,8 @@ static void add_text_route(struct tunnel *tunnel, const char *dest,
 	log_info("Registering route %s/%s via %s\n", dest, mask, gw);
 	l0 = strlen(*target);
 	l1 = strlen(fmt) + strlen(dest) + strlen(mask) + strlen(gw) + 1;
-	if ((ptr = realloc(*target, l0 + l1))) {
+	ptr = realloc(*target, l0 + l1);
+	if (ptr) {
 		*target = ptr;
 		snprintf(*target + l0, l1, fmt, dest, mask, gw);
 	} else {
@@ -1006,6 +1007,16 @@ int ipv4_restore_routes(struct tunnel *tunnel)
 	return 0;
 }
 
+static inline char *replace_char(char *str, char find, char replace)
+{
+	int i;
+
+	for (i = 0; i < strlen(str); i++)
+		if (str[i] == find)
+			str[i] = replace;
+	return str;
+}
+
 int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 {
 	int ret = -1;
@@ -1013,7 +1024,8 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 	struct stat stat;
 	char ns1[28], ns2[28]; // 11 + 15 + 1 + 1
 	char dns_suffix[MAX_DOMAIN_LENGTH+8];  // 7 + MAX_DOMAIN_LENGTH + 1
-	char *buffer;
+	char *buffer = NULL;
+	int use_resolvconf = 0;
 
 	tunnel->ipv4.ns1_was_there = 0;
 	tunnel->ipv4.ns2_was_there = 0;
@@ -1025,40 +1037,68 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 	if (tunnel->ipv4.ns2_addr.s_addr == 0)
 		tunnel->ipv4.ns2_was_there = -1;
 
-	file = fopen("/etc/resolv.conf", "r+");
-	if (file == NULL) {
-		log_warn("Could not open /etc/resolv.conf (%s).\n",
-		         strerror(errno));
-		return 1;
+	if (access(RESOLVCONF_PATH, F_OK) == 0) {
+		int resolvconf_call_len
+		        = strlen(RESOLVCONF_PATH)
+		          + 20
+		          + strlen(tunnel->ppp_iface);
+		char *resolvconf_call = malloc(resolvconf_call_len);
+		if (resolvconf_call == NULL) {
+			log_warn("Could not create command to run resolvconf (%s).\n",
+			         strerror(errno));
+			return 1;
+		}
+
+		snprintf(resolvconf_call, resolvconf_call_len,
+		         "%s -a \"%s.openfortivpn\"",
+		         RESOLVCONF_PATH,
+		         tunnel->ppp_iface);
+
+		use_resolvconf = 1;
+		log_debug("resolvconf_call: %s\n", resolvconf_call);
+		file = popen(resolvconf_call, "w");
+		free(resolvconf_call);
+		if (file == NULL) {
+			log_warn("Could not open pipe %s (%s).\n",
+			         resolvconf_call,
+			         strerror(errno));
+			return 1;
+		}
+	} else {
+		file = fopen("/etc/resolv.conf", "r+");
+		if (file == NULL) {
+			log_warn("Could not open /etc/resolv.conf (%s).\n",
+			         strerror(errno));
+			return 1;
+		}
+
+		if (fstat(fileno(file), &stat) == -1) {
+			log_warn("Could not stat /etc/resolv.conf (%s).\n",
+			         strerror(errno));
+			goto err_close;
+		}
+
+		if (stat.st_size == 0) {
+			log_warn("Could not read /etc/resolv.conf (%s).\n",
+			         "Empty file");
+			goto err_close;
+		}
+
+		buffer = malloc(stat.st_size + 1);
+		if (buffer == NULL) {
+			log_warn("Could not read /etc/resolv.conf (%s).\n",
+			         strerror(errno));
+			goto err_close;
+		}
+
+		// Copy all file contents at once
+		if (fread(buffer, stat.st_size, 1, file) != 1) {
+			log_warn("Could not read /etc/resolv.conf.\n");
+			goto err_free;
+		}
+
+		buffer[stat.st_size] = '\0';
 	}
-
-	if (fstat(fileno(file), &stat) == -1) {
-		log_warn("Could not stat /etc/resolv.conf (%s).\n",
-		         strerror(errno));
-		goto err_close;
-	}
-
-	if (stat.st_size == 0) {
-		log_warn("Could not read /etc/resolv.conf (%s).\n",
-		         "Empty file");
-		goto err_close;
-	}
-
-	buffer = malloc(stat.st_size + 1);
-	if (buffer == NULL) {
-		log_warn("Could not read /etc/resolv.conf (%s).\n",
-		         strerror(errno));
-		goto err_close;
-	}
-
-	// Copy all file contents at once
-	if (fread(buffer, stat.st_size, 1, file) != 1) {
-		log_warn("Could not read /etc/resolv.conf.\n");
-		goto err_free;
-	}
-
-	buffer[stat.st_size] = '\0';
-
 	if (tunnel->ipv4.ns1_addr.s_addr != 0) {
 		strcpy(ns1, "nameserver ");
 		strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
@@ -1076,59 +1116,63 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 	if (tunnel->ipv4.dns_suffix != NULL) {
 		strcpy(dns_suffix, "search ");
 		strncat(dns_suffix, tunnel->ipv4.dns_suffix, MAX_DOMAIN_LENGTH);
+		replace_char(dns_suffix, ';', ' ');
 	} else {
 		dns_suffix[0] = '\0';
 	}
 
-	for (const char *line = strtok(buffer, "\n");
-	     line != NULL;
-	     line = strtok(NULL, "\n")) {
-		if (strcmp(line, ns1) == 0) {
-			tunnel->ipv4.ns1_was_there = 1;
-			log_debug("ns1 already present in /etc/resolv.conf.\n");
-		}
-	}
-
-	if (tunnel->ipv4.ns1_was_there == 0)
-		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns1);
-
-	for (const char *line = strtok(buffer, "\n");
-	     line != NULL;
-	     line = strtok(NULL, "\n")) {
-		if (strcmp(line, ns2) == 0) {
-			tunnel->ipv4.ns2_was_there = 1;
-			log_debug("ns2 already present in /etc/resolv.conf.\n");
-		}
-	}
-
-	if (tunnel->ipv4.ns2_was_there == 0)
-		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns2);
-
-	if (dns_suffix[0] == '\0') {
-		tunnel->ipv4.dns_suffix_was_there = -1;
-	} else {
+	if (use_resolvconf == 0) {
 		for (const char *line = strtok(buffer, "\n");
 		     line != NULL;
 		     line = strtok(NULL, "\n")) {
-			if (dns_suffix[0] != '\0' && strcmp(line, dns_suffix) == 0) {
-				tunnel->ipv4.dns_suffix_was_there = 1;
-				log_debug("dns_suffix already present in /etc/resolv.conf.\n");
+			if (strcmp(line, ns1) == 0) {
+				tunnel->ipv4.ns1_was_there = 1;
+				log_debug("ns1 already present in /etc/resolv.conf.\n");
 			}
 		}
+
+		if (tunnel->ipv4.ns1_was_there == 0)
+			log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns1);
+
+		for (const char *line = strtok(buffer, "\n");
+		     line != NULL;
+		     line = strtok(NULL, "\n")) {
+			if (strcmp(line, ns2) == 0) {
+				tunnel->ipv4.ns2_was_there = 1;
+				log_debug("ns2 already present in /etc/resolv.conf.\n");
+			}
+		}
+
+		if (tunnel->ipv4.ns2_was_there == 0)
+			log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns2);
+
+		if (dns_suffix[0] == '\0') {
+			tunnel->ipv4.dns_suffix_was_there = -1;
+		} else {
+			for (const char *line = strtok(buffer, "\n");
+			     line != NULL;
+			     line = strtok(NULL, "\n")) {
+				if (dns_suffix[0] != '\0'
+				    && strcmp(line, dns_suffix) == 0) {
+					tunnel->ipv4.dns_suffix_was_there = 1;
+					log_debug("dns_suffix already present in /etc/resolv.conf.\n");
+				}
+			}
+		}
+
+		if (tunnel->ipv4.dns_suffix_was_there == 0)
+			log_debug("Adding \"%s\", to /etc/resolv.conf.\n", dns_suffix);
+
+		rewind(file);
+		if (fread(buffer, stat.st_size, 1, file) != 1) {
+			log_warn("Could not read /etc/resolv.conf.\n");
+			goto err_free;
+		}
+
+		buffer[stat.st_size] = '\0';
+
+		rewind(file);
 	}
-
-	if (tunnel->ipv4.dns_suffix_was_there == 0)
-		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", dns_suffix);
-
-	rewind(file);
-	if (fread(buffer, stat.st_size, 1, file) != 1) {
-		log_warn("Could not read /etc/resolv.conf.\n");
-		goto err_free;
-	}
-
-	buffer[stat.st_size] = '\0';
-
-	rewind(file);
 	if (tunnel->ipv4.ns1_was_there == 0) {
 		strcat(ns1, "\n");
 		fputs(ns1, file);
@@ -1141,14 +1185,18 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 		strcat(dns_suffix, "\n");
 		fputs(dns_suffix, file);
 	}
-	fwrite(buffer, stat.st_size, 1, file);
+	if (use_resolvconf == 0)
+		fwrite(buffer, stat.st_size, 1, file);
 
 	ret = 0;
 
 err_free:
 	free(buffer);
 err_close:
-	fclose(file);
+	if (use_resolvconf == 0)
+		fclose(file);
+	else
+		pclose(file);
 
 	return ret;
 }
@@ -1160,7 +1208,35 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 	struct stat stat;
 	char ns1[27], ns2[27]; // 11 + 15 + 1
 	char dns_suffix[MAX_DOMAIN_LENGTH+8];  // 7 + MAX_DOMAIN_LENGTH + 1
-	char *buffer;
+	char *buffer = NULL;
+
+
+	if (access(RESOLVCONF_PATH, F_OK) == 0) {
+		int resolvconf_call_len
+		        = strlen(RESOLVCONF_PATH)
+		          + 20
+		          + strlen(tunnel->ppp_iface);
+		char *resolvconf_call = malloc(resolvconf_call_len);
+		if (resolvconf_call == NULL) {
+			log_warn("Could not create command to run resolvconf (%s).\n",
+			         strerror(errno));
+			return ERR_IPV4_SEE_ERRNO;
+		}
+
+		snprintf(resolvconf_call,
+		         resolvconf_call_len,
+		         "%s -d \"%s.openfortivpn\"",
+		         RESOLVCONF_PATH,
+		         tunnel->ppp_iface
+		        );
+
+		log_debug("resolvconf_call: %s\n", resolvconf_call);
+		ret = system(resolvconf_call);
+		free(resolvconf_call);
+		if (ret == -1)
+			return ERR_IPV4_SEE_ERRNO;
+		return 0;
+	}
 
 	file = fopen("/etc/resolv.conf", "r+");
 	if (file == NULL) {
@@ -1190,18 +1266,18 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 
 	buffer[stat.st_size] = '\0';
 
-	ns1[0]='\0';
+	ns1[0] = '\0';
 	if (tunnel->ipv4.ns1_addr.s_addr != 0) {
 		strcpy(ns1, "nameserver ");
 		strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
 	}
-	ns2[0]='\0';
+	ns2[0] = '\0';
 	if (tunnel->ipv4.ns2_addr.s_addr != 0) {
 		strcpy(ns2, "nameserver ");
 		strncat(ns2, inet_ntoa(tunnel->ipv4.ns2_addr), 15);
 	}
-	dns_suffix[0]='\0';
-	if (tunnel->ipv4.dns_suffix != NULL && tunnel->ipv4.dns_suffix[0]!='\0') {
+	dns_suffix[0] = '\0';
+	if (tunnel->ipv4.dns_suffix != NULL && tunnel->ipv4.dns_suffix[0] != '\0') {
 		strcpy(dns_suffix, "search ");
 		strncat(dns_suffix, tunnel->ipv4.dns_suffix, MAX_DOMAIN_LENGTH);
 	}
@@ -1216,13 +1292,13 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 	for (const char *line = strtok(buffer, "\n");
 	     line != NULL;
 	     line = strtok(NULL, "\n")) {
-		if (ns1[0]!='\0' && strcmp(line, ns1) == 0
+		if (ns1[0] != '\0' && strcmp(line, ns1) == 0
 		    && (tunnel->ipv4.ns1_was_there == 0)) {
 			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", ns1);
-		} else if (ns2[0]!='\0' && strcmp(line, ns2) == 0
+		} else if (ns2[0] != '\0' && strcmp(line, ns2) == 0
 		           && (tunnel->ipv4.ns2_was_there == 0)) {
 			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", ns2);
-		} else if (dns_suffix[0]!='\0' && strcmp(line, dns_suffix) == 0
+		} else if (dns_suffix[0] != '\0' && strcmp(line, dns_suffix) == 0
 		           && (tunnel->ipv4.dns_suffix_was_there == 0)) {
 			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", dns_suffix);
 		} else {

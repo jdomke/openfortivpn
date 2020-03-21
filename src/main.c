@@ -99,17 +99,17 @@ PPPD_USAGE \
 "  -p <pass>, --password=<pass>  VPN account password.\n" \
 "  -o <otp>, --otp=<otp>         One-Time-Password.\n" \
 "  --otp-prompt=<prompt>         Search for the OTP prompt starting with this string\n" \
-"  --otp-delay=<delay>	         Wait <delay> seconds before sending the OTP.\n" \
+"  --otp-delay=<delay>           Wait <delay> seconds before sending the OTP.\n" \
 "  --pinentry=<program>          Use the program to supply a secret instead of asking for it\n" \
-"  --realm=<realm>               Use specified authentication realm on VPN gateway\n" \
+"  --realm=<realm>               Use specified authentication realm.\n" \
+"  --set-routes=[01]             Set if openfortivpn should configure routes\n" \
 "                                when tunnel is up.\n" \
-"  --set-routes=[01]             Set if openfortivpn should configure output routes through\n" \
-"                                the VPN when tunnel is up.\n" \
 "  --no-routes                   Do not configure routes, same as --set-routes=0.\n" \
 "  --half-internet-routes=[01]   Add two 0.0.0.0/1 and 128.0.0.0/1 routes with higher\n" \
 "                                priority instead of replacing the default route.\n" \
-"  --set-dns=[01]                Set if openfortivpn should add DNS name servers \n" \
-"                                and domain seach list in /etc/resolv.conf.\n" \
+"  --set-dns=[01]                Set if openfortivpn should add DNS name servers\n" \
+"                                and domain search list in /etc/resolv.conf.\n" \
+"                                If installed resolvconf is used for the update.\n" \
 "  --no-dns                      Do not reconfigure DNS, same as --set-dns=0\n" \
 "  --ca-file=<file>              Use specified PEM-encoded certificate bundle\n" \
 "                                instead of system-wide store to verify the gateway\n" \
@@ -407,7 +407,7 @@ int main(int argc, char **argv)
 			}
 			if (strcmp(long_options[option_index].name,
 			           "otp-delay") == 0) {
-				long int otp_delay = strtol(optarg, NULL, 0);
+				long otp_delay = strtol(optarg, NULL, 0);
 				if (otp_delay < 0 || otp_delay > UINT_MAX) {
 					log_warn("Bad otp-delay option: \"%s\"\n",
 					         optarg);
@@ -418,7 +418,7 @@ int main(int argc, char **argv)
 			}
 			if (strcmp(long_options[option_index].name,
 			           "persistent") == 0) {
-				long int persistent = strtol(optarg, NULL, 0);
+				long persistent = strtol(optarg, NULL, 0);
 				if (persistent < 0 || persistent > UINT_MAX) {
 					log_warn("Bad persistent option: \"%s\"\n",
 					         optarg);
@@ -474,6 +474,8 @@ int main(int argc, char **argv)
 	if (cli_cfg.password != NULL && cli_cfg.password[0] != '\0')
 		log_warn("You should not pass the password on the command line. Type it interactively or use a config file instead.\n");
 
+	log_debug_all("ATTENTION: the output contains sensitive information such as the THE CLEAR TEXT PASSWORD.\n");
+
 	log_debug("openfortivpn " VERSION "\n");
 
 	// Load config file
@@ -484,6 +486,14 @@ int main(int argc, char **argv)
 		else
 			log_warn("Could not load config file \"%s\" (%s).\n",
 			         config_file, err_cfg_str(ret));
+	}
+	if (cfg.password != NULL && cli_cfg.password == NULL) {
+		if (cfg.password[0] == '\0')
+			log_debug("Disabled password due to empty entry in config file \"%s\"\n",
+			          config_file);
+		else
+			log_debug("Loaded password from config file \"%s\"\n",
+			          config_file);
 	}
 	// Then apply CLI config
 	merge_config(&cfg, &cli_cfg);
@@ -497,7 +507,7 @@ int main(int argc, char **argv)
 			port_str[0] = '\0';
 			port_str++;
 			cfg.gateway_port = strtol(port_str, NULL, 0);
-			if (cfg.gateway_port <= 0 || cfg.gateway_port > 65535) {
+			if (cfg.gateway_port == 0 || cfg.gateway_port > 65535) {
 				log_error("Specify a valid port.\n");
 				goto user_error;
 			}
@@ -512,12 +522,12 @@ int main(int argc, char **argv)
 		goto user_error;
 	}
 	// Check username
-	if (cfg.username[0] == '\0' && cfg.use_engine != 1) {
-		log_error("Specify an username.\n");
+	if (cfg.username[0] == '\0' && cfg.user_cert == NULL) {
+		log_error("Specify a username.\n");
 		goto user_error;
 	}
 	// If username but no password given, interactively ask user
-	if (cfg.password == NULL && cfg.username[0] != '\0' ) {
+	if (cfg.password == NULL && cfg.username[0] != '\0') {
 		char *tmp_password = malloc(PWD_BUFSIZ); // allocate large buffer
 		read_password(cfg.pinentry, "password",
 		              "VPN account password: ", tmp_password, PWD_BUFSIZ);
@@ -531,6 +541,8 @@ int main(int argc, char **argv)
 		log_debug("Config username = \"%s\"\n", cfg.username);
 	if (cfg.password != NULL)
 		log_debug_all("Config password = \"%s\"\n", cfg.password);
+	else
+		cfg.password = strdup("");
 	if (cfg.otp[0] != '\0')
 		log_debug("One-time password = \"%s\"\n", cfg.otp);
 

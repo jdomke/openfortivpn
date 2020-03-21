@@ -29,6 +29,9 @@
 #include "tunnel.h"
 #include "http.h"
 #include "log.h"
+#ifndef HAVE_X509_CHECK_HOST
+#include "openssl_hostname_validation.h"
+#endif
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -61,8 +64,8 @@
 #endif
 
 struct ofv_varr {
-	unsigned cap;		// current capacity
-	unsigned off;		// next slot to write, always < max(cap - 1, 1)
+	unsigned int cap;	// current capacity
+	unsigned int off;	// next slot to write, always < max(cap - 1, 1)
 	const char **data;	// NULL terminated
 };
 
@@ -70,9 +73,9 @@ static int ofv_append_varr(struct ofv_varr *p, const char *x)
 {
 	if (p->off + 1 >= p->cap) {
 		const char **ndata;
-		unsigned ncap = (p->off + 1) * 2;
+		unsigned int ncap = (p->off + 1) * 2;
 		if (p->off + 1 >= ncap) {
-			log_error("ofv_append_varr: ncap exceeded\n");
+			log_error("%s: ncap exceeded\n", __func__);
 			return 1;
 		};
 		ndata = realloc(p->data, ncap * sizeof(const char *));
@@ -85,17 +88,16 @@ static int ofv_append_varr(struct ofv_varr *p, const char *x)
 		}
 	}
 	if (p->data == NULL) {
-		log_error("ofv_append_varr: NULL data\n");
+		log_error("%s: NULL data\n", __func__);
 		return 1;
 	}
-	if (p->off + 1 < p->cap) {
-		p->data[p->off] = x;
-		p->data[++p->off] = NULL;
-		return 0;
-	} else {
-		log_error("ofv_append_varr: cap exceeded in p\n");
+	if (p->off + 1 >= p->cap) {
+		log_error("%s: cap exceeded in p\n", __func__);
 		return 1;
 	}
+	p->data[p->off] = x;
+	p->data[++p->off] = NULL;
+	return 0;
 }
 
 static int on_ppp_if_up(struct tunnel *tunnel)
@@ -109,9 +111,8 @@ static int on_ppp_if_up(struct tunnel *tunnel)
 
 		ret = ipv4_set_tunnel_routes(tunnel);
 
-		if (ret != 0) {
+		if (ret != 0)
 			log_warn("Adding route table is incomplete. Please check route table.\n");
-		}
 	}
 
 	if (tunnel->config->set_dns) {
@@ -193,11 +194,11 @@ static int pppd_run(struct tunnel *tunnel)
 		 * e.g. the name of the configuration or options
 		 * to send interactively to ppp will be added later
 		 */
-		const char *v[] = {
+		static const char *const v[] = {
 			ppp_path,
 			"-direct"
 		};
-		for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
+		for (unsigned int i = 0; i < ARRAY_SIZE(v); i++)
 			if (ofv_append_varr(&pppd_args, v[i]))
 				return 1;
 #endif
@@ -210,7 +211,7 @@ static int pppd_run(struct tunnel *tunnel)
 			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_call))
 				return 1;
 		} else {
-			const char *v[] = {
+			static const char *const v[] = {
 				ppp_path,
 				"115200", // speed
 				":192.0.2.1", // <local_IP_address>:<remote_IP_address>
@@ -225,7 +226,7 @@ static int pppd_run(struct tunnel *tunnel)
 				"lcp-max-configure", "40",
 				"mru", "1354"
 			};
-			for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
+			for (unsigned int i = 0; i < ARRAY_SIZE(v); i++)
 				if (ofv_append_varr(&pppd_args, v[i]))
 					return 1;
 		}
@@ -408,12 +409,12 @@ int ppp_interface_is_up(struct tunnel *tunnel)
 		            (tunnel->config->pppd_ifname
 		             && strstr(ifa->ifa_name, tunnel->config->pppd_ifname)
 		             != NULL)
-		            || strstr(ifa->ifa_name, "ppp") != NULL)
+		            || strstr(ifa->ifa_name, "ppp") != NULL
 #endif
 #if HAVE_USR_SBIN_PPP
-		    strstr(ifa->ifa_name, "tun") != NULL)
+		            strstr(ifa->ifa_name, "tun") != NULL
 #endif
-			&& ifa->ifa_flags& IFF_UP) {
+		    ) && ifa->ifa_flags & IFF_UP) {
 			if (&(ifa->ifa_addr->sa_family) != NULL
 			    && ifa->ifa_addr->sa_family == AF_INET) {
 				struct in_addr if_ip_addr =
@@ -589,7 +590,7 @@ static int tcp_connect(struct tunnel *tunnel)
 			}
 
 			// detect "200"
-			const char HTTP_STATUS_200[] = "200";
+			static const char HTTP_STATUS_200[] = "200";
 			response = strstr(request, HTTP_STATUS_200);
 
 			// detect end-of-line after "200"
@@ -611,7 +612,7 @@ static int tcp_connect(struct tunnel *tunnel)
 				 * 	recognize a single LF as a line terminator
 				 * 	and ignore the leading CR.
 				 */
-				static const char *HTTP_EOL[] = {
+				static const char *const HTTP_EOL[] = {
 					"\r\n\r\n",
 					"\n\n"
 				};
@@ -654,7 +655,6 @@ static int ssl_verify_cert(struct tunnel *tunnel)
 	char *line;
 	int i;
 	X509_NAME *subj;
-	char common_name[FIELD_SIZE + 1];
 
 	SSL_set_verify(tunnel->ssl_handle, SSL_VERIFY_PEER, NULL);
 
@@ -668,16 +668,15 @@ static int ssl_verify_cert(struct tunnel *tunnel)
 
 #ifdef HAVE_X509_CHECK_HOST
 	// Use OpenSSL native host validation if v >= 1.0.2.
-	if (X509_check_host(cert, common_name, FIELD_SIZE, 0, NULL))
+	// compare against gateway_host and correctly check return value
+	// to fix piror Incorrect use of X509_check_host
+	if (X509_check_host(cert, tunnel->config->gateway_host,
+	                    0, 0, NULL) == 1)
 		cert_valid = 1;
 #else
-	// Use explicit Common Name check if native validation not available.
-	// Note: this will ignore Subject Alternative Name fields.
-	if (subj
-	    && X509_NAME_get_text_by_NID(subj, NID_commonName, common_name,
-	                                 FIELD_SIZE) > 0
-	    && strncasecmp(common_name, tunnel->config->gateway_host,
-	                   FIELD_SIZE) == 0)
+	// Use validate_hostname form iSECPartners if native validation not available
+	// in order to avoid TLS Certificate CommonName NULL Byte Vulnerability
+	if (validate_hostname(tunnel->config->gateway_host, cert) == MatchFound)
 		cert_valid = 1;
 #endif
 
@@ -831,8 +830,8 @@ int ssl_connect(struct tunnel *tunnel)
 			return 1;
 		}
 
-		EVP_PKEY *privkey = ENGINE_load_private_key(
-		                            e, parms.uri, UI_OpenSSL(), NULL);
+		EVP_PKEY * privkey = ENGINE_load_private_key(
+		                             e, parms.uri, UI_OpenSSL(), NULL);
 		if (!privkey) {
 			log_error("PKCS11 ENGINE_load_private_key: %s\n",
 			          ERR_error_string(ERR_peek_last_error(), NULL));
@@ -905,17 +904,15 @@ int ssl_connect(struct tunnel *tunnel)
 		if (!tunnel->config->cipher_list) {
 			const char *cipher_list;
 			if (tunnel->config->seclevel_1)
-				cipher_list = "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4"
-				              "@SECLEVEL=1";
+				cipher_list = "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4@SECLEVEL=1";
 			else
 				cipher_list = "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4";
 			tunnel->config->cipher_list = strdup(cipher_list);
 		}
 	} else {
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
-		if (tunnel->config->min_tls <= 0) {
+		if (tunnel->config->min_tls <= 0)
 			tunnel->config->min_tls = TLS1_VERSION;
-		}
 #endif
 		if (!tunnel->config->cipher_list && tunnel->config->seclevel_1) {
 			const char *cipher_list = "DEFAULT@SECLEVEL=1";
@@ -924,7 +921,7 @@ int ssl_connect(struct tunnel *tunnel)
 	}
 
 	if (tunnel->config->cipher_list) {
-		log_debug("Setting cipher list to: %s", tunnel->config->cipher_list);
+		log_debug("Setting cipher list to: %s\n", tunnel->config->cipher_list);
 		if (!SSL_set_cipher_list(tunnel->ssl_handle,
 		                         tunnel->config->cipher_list)) {
 			log_error("SSL_set_cipher_list failed: %s\n",
