@@ -37,11 +37,12 @@
 #endif
 
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #include <sys/types.h>
 
 #ifdef __clang__
 /*
- * Get rid of OSX 10.7 and greater deprecation warnings
+ * Get rid of Mac OS X 10.7 and greater deprecation warnings
  * see for instance https://wiki.openssl.org/index.php/Hostname_validation
  * this pragma selectively suppresses this type of warnings in clang
  */
@@ -76,6 +77,11 @@ struct tunnel {
 
 	int (*on_ppp_if_up)(struct tunnel *);
 	int (*on_ppp_if_down)(struct tunnel *);
+};
+
+struct token {
+	const char *uri;
+	X509 *cert;
 };
 
 int ppp_interface_is_up(struct tunnel *tunnel);

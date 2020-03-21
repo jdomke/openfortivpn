@@ -42,6 +42,7 @@
 #include <sys/ioctl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
+#include <openssl/engine.h>
 #if HAVE_PTY_H
 #include <pty.h>
 #elif HAVE_UTIL_H
@@ -50,7 +51,6 @@
 #include <termios.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <assert.h>
 #if HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif
@@ -66,25 +66,36 @@ struct ofv_varr {
 	const char **data;	// NULL terminated
 };
 
-static void ofv_append_varr(struct ofv_varr *p, const char *x)
+static int ofv_append_varr(struct ofv_varr *p, const char *x)
 {
 	if (p->off + 1 >= p->cap) {
 		const char **ndata;
 		unsigned ncap = (p->off + 1) * 2;
-		assert(p->off + 1 < ncap);
+		if (p->off + 1 >= ncap) {
+			log_error("ofv_append_varr: ncap exceeded\n");
+			return 1;
+		};
 		ndata = realloc(p->data, ncap * sizeof(const char *));
 		if (ndata) {
 			p->data = ndata;
 			p->cap = ncap;
 		} else {
 			log_error("realloc: %s\n", strerror(errno));
-			assert(ndata);
-			return;
+			return 1;
 		}
 	}
-	assert(p->off + 1 < p->cap);
-	p->data[p->off] = x;
-	p->data[++p->off] = NULL;
+	if (p->data == NULL) {
+		log_error("ofv_append_varr: NULL data\n");
+		return 1;
+	}
+	if (p->off + 1 < p->cap) {
+		p->data[p->off] = x;
+		p->data[++p->off] = NULL;
+		return 0;
+	} else {
+		log_error("ofv_append_varr: cap exceeded in p\n");
+		return 1;
+	}
 }
 
 static int on_ppp_if_up(struct tunnel *tunnel)
@@ -157,16 +168,18 @@ static int pppd_run(struct tunnel *tunnel)
 
 	slave_stderr = dup(STDERR_FILENO);
 
+	if (slave_stderr < 0) {
+		log_error("slave stderr %s\n", strerror(errno));
+		return 1;
+	}
+
 #ifdef HAVE_STRUCT_TERMIOS
 	pid = forkpty(&amaster, NULL, &termp, NULL);
 #else
 	pid = forkpty(&amaster, NULL, NULL, NULL);
 #endif
 
-	if (pid == -1) {
-		log_error("forkpty: %s\n", strerror(errno));
-		return 1;
-	} else if (pid == 0) { // child process
+	if (pid == 0) { // child process
 
 		struct ofv_varr pppd_args = { 0, 0, NULL };
 
@@ -175,23 +188,27 @@ static int pppd_run(struct tunnel *tunnel)
 
 #if HAVE_USR_SBIN_PPP
 		/*
-		* assume there is a default configuration to start.
-		* Support for taking options from the command line
-		* e.g. the name of the configuration or options
-		* to send interactively to ppp will be added later
-		*/
+		 * assume there is a default configuration to start.
+		 * Support for taking options from the command line
+		 * e.g. the name of the configuration or options
+		 * to send interactively to ppp will be added later
+		 */
 		const char *v[] = {
 			ppp_path,
 			"-direct"
 		};
-		for (unsigned i = 0; i < sizeof v/sizeof v[0]; i++)
-			ofv_append_varr(&pppd_args, v[i]);
+		for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
+			if (ofv_append_varr(&pppd_args, v[i]))
+				return 1;
 #endif
 #if HAVE_USR_SBIN_PPPD
 		if (tunnel->config->pppd_call) {
-			ofv_append_varr(&pppd_args, ppp_path);
-			ofv_append_varr(&pppd_args, "call");
-			ofv_append_varr(&pppd_args, tunnel->config->pppd_call);
+			if (ofv_append_varr(&pppd_args, ppp_path))
+				return 1;
+			if (ofv_append_varr(&pppd_args, "call"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_call))
+				return 1;
 		} else {
 			const char *v[] = {
 				ppp_path,
@@ -209,36 +226,52 @@ static int pppd_run(struct tunnel *tunnel)
 				"mru", "1354"
 			};
 			for (unsigned i = 0; i < ARRAY_SIZE(v); i++)
-				ofv_append_varr(&pppd_args, v[i]);
+				if (ofv_append_varr(&pppd_args, v[i]))
+					return 1;
 		}
 		if (tunnel->config->pppd_use_peerdns)
-			ofv_append_varr(&pppd_args, "usepeerdns");
+			if (ofv_append_varr(&pppd_args, "usepeerdns"))
+				return 1;
 		if (tunnel->config->pppd_log) {
-			ofv_append_varr(&pppd_args, "debug");
-			ofv_append_varr(&pppd_args, "logfile");
-			ofv_append_varr(&pppd_args, tunnel->config->pppd_log);
+			if (ofv_append_varr(&pppd_args, "debug"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, "logfile"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_log))
+				return 1;
 		} else {
-			/* pppd defaults to logging to fd=1, clobbering the
-			 * actual PPP data */
-			ofv_append_varr(&pppd_args, "logfd");
-			ofv_append_varr(&pppd_args, "2");
+			/*
+			 * pppd defaults to logging to fd=1, clobbering the
+			 * actual PPP data
+			 */
+			if (ofv_append_varr(&pppd_args, "logfd"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, "2"))
+				return 1;
 		}
 		if (tunnel->config->pppd_plugin) {
-			ofv_append_varr(&pppd_args, "plugin");
-			ofv_append_varr(&pppd_args, tunnel->config->pppd_plugin);
+			if (ofv_append_varr(&pppd_args, "plugin"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_plugin))
+				return 1;
 		}
 		if (tunnel->config->pppd_ipparam) {
-			ofv_append_varr(&pppd_args, "ipparam");
-			ofv_append_varr(&pppd_args, tunnel->config->pppd_ipparam);
+			if (ofv_append_varr(&pppd_args, "ipparam"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_ipparam))
+				return 1;
 		}
 		if (tunnel->config->pppd_ifname) {
-			ofv_append_varr(&pppd_args, "ifname");
-			ofv_append_varr(&pppd_args, tunnel->config->pppd_ifname);
+			if (ofv_append_varr(&pppd_args, "ifname"))
+				return 1;
+			if (ofv_append_varr(&pppd_args, tunnel->config->pppd_ifname))
+				return 1;
 		}
 #endif
 #if HAVE_USR_SBIN_PPP
 		if (tunnel->config->ppp_system) {
-			ofv_append_varr(&pppd_args, tunnel->config->ppp_system);
+			if (ofv_append_varr(&pppd_args, tunnel->config->ppp_system))
+				return 1;
 		}
 #endif
 
@@ -248,8 +281,13 @@ static int pppd_run(struct tunnel *tunnel)
 
 		fprintf(stderr, "execvp: %s\n", strerror(errno));
 		_exit(EXIT_FAILURE);
+	} else {
+		close(slave_stderr);
+		if (pid == -1) {
+			log_error("forkpty: %s\n", strerror(errno));
+			return 1;
+		}
 	}
-	close(slave_stderr);
 
 	// Set non-blocking
 	int flags = fcntl(amaster, F_GETFL, 0);
@@ -475,7 +513,7 @@ static int tcp_connect(struct tunnel *tunnel)
 		log_debug("proxy_host: %s\n", proxy_host);
 		log_debug("proxy_port: %s\n", proxy_port);
 		server.sin_addr.s_addr = inet_addr(proxy_host);
-		// if host is given as fqhn we have to do a dns lookup
+		// if host is given as a FQDN we have to do a DNS lookup
 		if (server.sin_addr.s_addr == INADDR_NONE) {
 			const struct addrinfo hints = { .ai_family = AF_INET };
 			struct addrinfo *result = NULL;
@@ -545,7 +583,7 @@ static int tcp_connect(struct tunnel *tunnel)
 			 */
 			ssize_t bytes_read = read(handle, &(request[j]), 1);
 			if (bytes_read < 1) {
-				log_error("Proxy response is unexpectedly large and cannot fit in the %d-bytes buffer.\n",
+				log_error("Proxy response is unexpectedly large and cannot fit in the %lu-bytes buffer.\n",
 				          ARRAY_SIZE(request));
 				goto err_proxy_response;
 			}
@@ -715,7 +753,7 @@ static void ssl_disconnect(struct tunnel *tunnel)
 }
 
 /*
- * Connects to the gateway and initiate a SSL session.
+ * Connects to the gateway and initiate an SSL session.
  */
 int ssl_connect(struct tunnel *tunnel)
 {
@@ -725,7 +763,7 @@ int ssl_connect(struct tunnel *tunnel)
 	if (tunnel->ssl_socket == -1)
 		return 1;
 
-	// registration is deprecated from openssl 1.1.0 onwards
+	// registration is deprecated from OpenSSL 1.1.0 onward
 #if OPENSSL_API_COMPAT < 0x10100000L
 	// Register the error strings for libcrypto & libssl
 	SSL_load_error_strings();
@@ -754,31 +792,93 @@ int ssl_connect(struct tunnel *tunnel)
 		}
 	}
 
-	if (tunnel->config->user_cert) {
-		if (!SSL_CTX_use_certificate_file(
-		            tunnel->ssl_context, tunnel->config->user_cert,
-		            SSL_FILETYPE_PEM)) {
-			log_error("SSL_CTX_use_certificate_file: %s\n",
+	/* Use engine for PIV if user-cert config starts with pkcs11 URI: */
+	if (tunnel->config->use_engine > 0) {
+
+		ENGINE *e;
+		ENGINE_load_builtin_engines();
+		e = ENGINE_by_id("pkcs11");
+		if (!e) {
+			log_error("Could not load pkcs11 Engine: %s\n",
 			          ERR_error_string(ERR_peek_last_error(), NULL));
 			return 1;
 		}
-	}
+		if (!ENGINE_init(e)) {
+			log_error("Could not init pkcs11 Engine: %s\n",
+			          ERR_error_string(ERR_peek_last_error(), NULL));
+			ENGINE_free(e);
+			return 1;
+		}
+		if (!ENGINE_set_default_RSA(e))
+			abort();
 
-	if (tunnel->config->user_key) {
-		if (!SSL_CTX_use_PrivateKey_file(
-		            tunnel->ssl_context, tunnel->config->user_key,
-		            SSL_FILETYPE_PEM)) {
-			log_error("SSL_CTX_use_PrivateKey_file: %s\n",
+		ENGINE_finish(e);
+		ENGINE_free(e);
+
+		struct token parms;
+		parms.uri = tunnel->config->user_cert;
+		parms.cert = NULL;
+
+		if (!ENGINE_ctrl_cmd(e, "LOAD_CERT_CTRL", 0, &parms, NULL, 1)) {
+			log_error("PKCS11 ENGINE_ctrl_cmd: %s\n",
 			          ERR_error_string(ERR_peek_last_error(), NULL));
 			return 1;
 		}
-	}
 
-	if (tunnel->config->user_cert && tunnel->config->user_key) {
+		if (!SSL_CTX_use_certificate(tunnel->ssl_context, parms.cert)) {
+			log_error("PKCS11 SSL_CTX_use_certificate: %s\n",
+			          ERR_error_string(ERR_peek_last_error(), NULL));
+			return 1;
+		}
+
+		EVP_PKEY *privkey = ENGINE_load_private_key(
+		                            e, parms.uri, UI_OpenSSL(), NULL);
+		if (!privkey) {
+			log_error("PKCS11 ENGINE_load_private_key: %s\n",
+			          ERR_error_string(ERR_peek_last_error(), NULL));
+			return 1;
+		}
+
+		if (!SSL_CTX_use_PrivateKey(tunnel->ssl_context, privkey)) {
+			log_error("PKCS11 SSL_CTX_use_PrivateKey_file: %s\n",
+			          ERR_error_string(ERR_peek_last_error(), NULL));
+			return 1;
+		}
+
 		if (!SSL_CTX_check_private_key(tunnel->ssl_context)) {
-			log_error("SSL_CTX_check_private_key: %s\n",
+			log_error("PKCS11 SSL_CTX_check_private_key: %s\n",
 			          ERR_error_string(ERR_peek_last_error(), NULL));
 			return 1;
+		}
+
+	} else {        /* end PKCS11-engine */
+
+		if (tunnel->config->user_cert) {
+			if (!SSL_CTX_use_certificate_file(
+			            tunnel->ssl_context, tunnel->config->user_cert,
+			            SSL_FILETYPE_PEM)) {
+				log_error("SSL_CTX_use_certificate_file: %s\n",
+				          ERR_error_string(ERR_peek_last_error(), NULL));
+				return 1;
+			}
+		}
+
+		if (tunnel->config->user_key) {
+			if (!SSL_CTX_use_PrivateKey_file(
+			            tunnel->ssl_context, tunnel->config->user_key,
+			            SSL_FILETYPE_PEM)) {
+				log_error("SSL_CTX_use_PrivateKey_file: %s\n",
+				          ERR_error_string(ERR_peek_last_error(), NULL));
+				return 1;
+			}
+		}
+
+		if (tunnel->config->user_cert && tunnel->config->user_key) {
+			if (!SSL_CTX_check_private_key(tunnel->ssl_context)) {
+				log_error("SSL_CTX_check_private_key: %s\n",
+				          ERR_error_string(ERR_peek_last_error(), NULL));
+				return 1;
+			}
 		}
 	}
 
@@ -882,6 +982,7 @@ int run_tunnel(struct vpn_config *config)
 		.ssl_handle = NULL,
 		.ipv4.ns1_addr.s_addr = 0,
 		.ipv4.ns2_addr.s_addr = 0,
+		.ipv4.dns_suffix = NULL,
 		.on_ppp_if_up = on_ppp_if_up,
 		.on_ppp_if_down = on_ppp_if_down
 	};

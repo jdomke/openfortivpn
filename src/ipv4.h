@@ -21,7 +21,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #ifdef HAVE_SYS_MUTEX_H
-/* Mac OSX and BSD wants this explicit include */
+/* Mac OS X and BSD wants this explicit include */
 #include <sys/mutex.h>
 #endif
 #include <netinet/in.h>
@@ -33,7 +33,8 @@
 #endif
 
 #if !HAVE_RT_ENTRY_WITH_RT_DST
-/* On MacOSX and FreeBSD struct rtentry is not directly available.
+/*
+ * On Mac OS X and FreeBSD struct rtentry is not directly available.
  * On FreeBSD one could #define _WANT_RTENTRY but the struct does not
  * contain rt_dst for instance. The entries for mask and destination
  * are maintained in a separate radix_tree structure by the routing
@@ -68,7 +69,10 @@ struct ipv4_config {
 
 	struct in_addr	ns1_addr;
 	struct in_addr	ns2_addr;
-	int		ns_are_new; // were ns already in /etc/resolv.conf?
+	char		*dns_suffix;
+	int		ns1_was_there;  // were ns1 already in /etc/resolv.conf?
+	int		ns2_was_there;  // were ns2 already in /etc/resolv.conf?
+	int		dns_suffix_was_there; // was the dns suffix already there?
 	int		split_routes;
 	int		route_to_vpn_is_added;
 

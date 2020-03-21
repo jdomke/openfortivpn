@@ -40,7 +40,7 @@
 #include <errno.h>
 
 #if HAVE_MACH_MACH_H
-/* this is typical for mach kernel used on Mac OSX */
+/* this is typical for mach kernel used on Mac OS X */
 #include <mach/mach.h>
 
 /* Mac OS X defines sem_init but actually does not implement them */
@@ -205,7 +205,7 @@ static void *pppd_read(void *arg)
 			log_error("read: %s\n", strerror(errno));
 			break;
 		} else if (n == 0) {
-			log_warn("read returned %d\n", n);
+			log_warn("read returned %ld\n", n);
 			continue;
 		} else if (first_time) {
 			// pppd did talk, now we can write to it if we want
@@ -253,7 +253,7 @@ static void *pppd_read(void *arg)
 			packet = repacket;
 			packet->len = pktsize;
 
-			log_debug("%s ---> gateway (%d bytes)\n", PPP_DAEMON,
+			log_debug("%s ---> gateway (%lu bytes)\n", PPP_DAEMON,
 			          packet->len);
 #if HAVE_USR_SBIN_PPPD
 			log_packet("pppd:   ", packet->len, pkt_data(packet));
@@ -376,11 +376,13 @@ static inline void set_tunnel_ips(struct tunnel *tunnel,
 {
 	memcpy(&tunnel->ipv4.ip_addr.s_addr, &pkt_data(packet)[8],
 	       sizeof(uint32_t));
-	if (packet->len >= 18 && pkt_data(packet)[12] == 0x81) {
+	if (packet->len >= 18 && pkt_data(packet)[12] == 0x81
+	    && tunnel->config->pppd_use_peerdns) {
 		memcpy(&tunnel->ipv4.ns1_addr.s_addr, &pkt_data(packet)[14],
 		       sizeof(uint32_t));
 	}
-	if (packet->len >= 24 && pkt_data(packet)[18] == 0x83) {
+	if (packet->len >= 24 && pkt_data(packet)[18] == 0x83
+	    && tunnel->config->pppd_use_peerdns) {
 		memcpy(&tunnel->ipv4.ns2_addr.s_addr, &pkt_data(packet)[20],
 		       sizeof(uint32_t));
 	}
@@ -437,10 +439,10 @@ static void *ssl_read(void *arg)
 			goto exit;
 		}
 
-		total = header[0] << 8 | header[1];
-		magic = header[2] << 8 | header[3];
-		size = header[4] << 8 | header[5];
-		if (magic != 0x5050 || total != size + 6) {
+		total = (header[0] << 8) | header[1];
+		magic = (header[2] << 8) | header[3];
+		size = (header[4] << 8) | header[5];
+		if (magic != 0x5050 || total != 6 + size || size == 0 || size >= 0xffff) {
 			log_error("Received bad header from gateway:\n");
 			debug_bad_packet(tunnel, header);
 			break;
@@ -463,7 +465,7 @@ static void *ssl_read(void *arg)
 			goto exit;
 		}
 
-		log_debug("gateway ---> %s (%d bytes)\n", PPP_DAEMON, packet->len);
+		log_debug("gateway ---> %s (%lu bytes)\n", PPP_DAEMON, packet->len);
 		log_packet("gtw:    ", packet->len, pkt_data(packet));
 		pool_push(&tunnel->ssl_to_pty_pool, packet);
 

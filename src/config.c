@@ -60,7 +60,8 @@ const struct vpn_config invalid_cfg = {
 	.cipher_list = NULL,
 	.min_tls = -1,
 	.seclevel_1 = -1,
-	.cert_whitelist = NULL
+	.cert_whitelist = NULL,
+	.use_engine = -1
 };
 
 /*
@@ -114,10 +115,10 @@ int strtob(const char *str)
 }
 
 /*
- * Converts string to tls version
+ * Converts string to TLS version
  *
  * @params[in] str  the string to read from
- * @return          openssl version or -1
+ * @return          OpenSSL version or -1
  */
 int parse_min_tls(const char *str)
 {
@@ -231,7 +232,7 @@ int load_config(struct vpn_config *cfg, const char *filename)
 		} else if (strcmp(key, "port") == 0) {
 			unsigned long int port = strtoul(val, NULL, 0);
 			if (port <= 0 || port > 65535) {
-				log_warn("Bad port in config file: \"%d\".\n",
+				log_warn("Bad port in config file: \"%lu\".\n",
 				         port);
 				continue;
 			}
@@ -350,6 +351,8 @@ int load_config(struct vpn_config *cfg, const char *filename)
 		} else if (strcmp(key, "user-cert") == 0) {
 			free(cfg->user_cert);
 			cfg->user_cert = strdup(val);
+			if (strncmp(cfg->user_cert, "pkcs11:", 7) == 0)
+				cfg->use_engine = 1;
 		} else if (strcmp(key, "user-key") == 0) {
 			free(cfg->user_key);
 			cfg->user_key = strdup(val);
@@ -491,6 +494,8 @@ void merge_config(struct vpn_config *dst, struct vpn_config *src)
 	}
 	if (src->user_cert) {
 		free(dst->user_cert);
+		if (strncmp(src->user_cert, "pkcs11:", 7) == 0)
+			dst->use_engine = 1;
 		dst->user_cert = src->user_cert;
 	}
 	if (src->user_key) {

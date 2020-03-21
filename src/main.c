@@ -38,8 +38,8 @@
 #define PPPD_HELP \
 "  --pppd-use-peerdns=[01]       Whether to ask peer ppp server for DNS server\n" \
 "                                addresses and make pppd rewrite /etc/resolv.conf.\n" \
-"  --pppd-no-peerdns             Same as --pppd-use-peerdns=0. Neiter pppd\n" \
-"                                nor openfortivpn will modify DNS resolution then.\n" \
+"  --pppd-no-peerdns             Same as --pppd-use-peerdns=0. pppd will not\n" \
+"                                modify DNS resolution then.\n" \
 "  --pppd-log=<file>             Set pppd in debug mode and save its logs into\n" \
 "                                <file>.\n" \
 "  --pppd-plugin=<file>          Use specified pppd plugin instead of configuring\n" \
@@ -85,7 +85,7 @@ PPPD_USAGE \
 #define help_min_tls ""
 #else
 #define help_min_tls " This option\n" \
-"                                is not supported by your openssl library."
+"                                is not supported by your OpenSSL library."
 #endif
 
 
@@ -98,7 +98,7 @@ PPPD_USAGE \
 "  -u <user>, --username=<user>  VPN account username.\n" \
 "  -p <pass>, --password=<pass>  VPN account password.\n" \
 "  -o <otp>, --otp=<otp>         One-Time-Password.\n" \
-"  --otp-prompt=<prompt>         Search for the otp prompt starting with this string\n" \
+"  --otp-prompt=<prompt>         Search for the OTP prompt starting with this string\n" \
 "  --otp-delay=<delay>	         Wait <delay> seconds before sending the OTP.\n" \
 "  --pinentry=<program>          Use the program to supply a secret instead of asking for it\n" \
 "  --realm=<realm>               Use specified authentication realm on VPN gateway\n" \
@@ -108,14 +108,15 @@ PPPD_USAGE \
 "  --no-routes                   Do not configure routes, same as --set-routes=0.\n" \
 "  --half-internet-routes=[01]   Add two 0.0.0.0/1 and 128.0.0.0/1 routes with higher\n" \
 "                                priority instead of replacing the default route.\n" \
-"  --set-dns=[01]                Set if openfortivpn should add VPN name servers in\n" \
-"                                /etc/resolv.conf, pppd must provide the DNS servers.\n" \
+"  --set-dns=[01]                Set if openfortivpn should add DNS name servers \n" \
+"                                and domain seach list in /etc/resolv.conf.\n" \
 "  --no-dns                      Do not reconfigure DNS, same as --set-dns=0\n" \
 "  --ca-file=<file>              Use specified PEM-encoded certificate bundle\n" \
 "                                instead of system-wide store to verify the gateway\n" \
 "                                certificate.\n" \
 "  --user-cert=<file>            Use specified PEM-encoded certificate if the server\n" \
 "                                requires authentication with a certificate.\n" \
+"  --user-cert=pkcs11:           Use smartcard. Takes also partial or full PKCS11-URI.\n" \
 "  --user-key=<file>             Use specified PEM-encoded key if the server requires\n" \
 "                                authentication with a certificate.\n" \
 "  --use-syslog                  Log to syslog instead of terminal.\n" \
@@ -126,14 +127,14 @@ PPPD_USAGE \
 "                                This option can be used multiple times to trust\n" \
 "                                several certificates.\n" \
 "  --insecure-ssl                Do not disable insecure SSL protocols/ciphers.\n" \
-"                                Also enable TLSv1.0 if applicable.\n" \
+"                                Also enable TLS v1.0 if applicable.\n" \
 "                                If your server requires a specific cipher or protocol,\n" \
 "                                consider using --cipher-list and/or --min-tls instead.\n" \
-"  --cipher-list=<ciphers>       Openssl ciphers to use. If default does not work\n" \
+"  --cipher-list=<ciphers>       OpenSSL ciphers to use. If default does not work\n" \
 "                                you can try with the cipher suggested in the output\n" \
 "                                of 'openssl s_client -connect <host:port>'\n" \
 "                                (e.g. AES256-GCM-SHA384)\n" \
-"  --min-tls                     Use minimum tls version instead of system default.\n" \
+"  --min-tls                     Use minimum TLS version instead of system default.\n" \
 "                                Valid values are 1.0, 1.1, 1.2, 1.3." help_min_tls "\n" \
 "  --seclevel-1                  If --cipher-list is not specified, add @SECLEVEL=1 to\n" \
 "                                (compiled in) list of ciphers. This lowers limits on\n" \
@@ -186,7 +187,7 @@ int main(int argc, char **argv)
 		.half_internet_routes = 0,
 		.persistent = 0,
 #if HAVE_USR_SBIN_PPPD
-		.pppd_use_peerdns = 1,
+		.pppd_use_peerdns = 0,
 		.pppd_log = NULL,
 		.pppd_plugin = NULL,
 		.pppd_ipparam = NULL,
@@ -473,7 +474,7 @@ int main(int argc, char **argv)
 	if (cli_cfg.password != NULL && cli_cfg.password[0] != '\0')
 		log_warn("You should not pass the password on the command line. Type it interactively or use a config file instead.\n");
 
-	log_debug("openfortivpn " VERSION "\n", config_file);
+	log_debug("openfortivpn " VERSION "\n");
 
 	// Load config file
 	if (config_file[0] != '\0') {
@@ -511,30 +512,25 @@ int main(int argc, char **argv)
 		goto user_error;
 	}
 	// Check username
-	if (cfg.username[0] == '\0') {
+	if (cfg.username[0] == '\0' && cfg.use_engine != 1) {
 		log_error("Specify an username.\n");
 		goto user_error;
 	}
-	// If no password given, interactively ask user
-	if (cfg.password == NULL || cfg.password[0] == '\0') {
-		free(cfg.password);
+	// If username but no password given, interactively ask user
+	if (cfg.password == NULL && cfg.username[0] != '\0' ) {
 		char *tmp_password = malloc(PWD_BUFSIZ); // allocate large buffer
 		read_password(cfg.pinentry, "password",
 		              "VPN account password: ", tmp_password, PWD_BUFSIZ);
 		cfg.password = strdup(tmp_password); // copy string of correct size
 		free(tmp_password);
 	}
-	// Check password
-	if (cfg.password[0] == '\0') {
-		log_error("Specify a password.\n");
-		goto user_error;
-	}
-
 	log_debug("Config host = \"%s\"\n", cfg.gateway_host);
 	log_debug("Config realm = \"%s\"\n", cfg.realm);
 	log_debug("Config port = \"%d\"\n", cfg.gateway_port);
-	log_debug("Config username = \"%s\"\n", cfg.username);
-	log_debug_all("Config password = \"%s\"\n", cfg.password);
+	if (cfg.username[0] != '\0')
+		log_debug("Config username = \"%s\"\n", cfg.username);
+	if (cfg.password != NULL)
+		log_debug_all("Config password = \"%s\"\n", cfg.password);
 	if (cfg.otp[0] != '\0')
 		log_debug("One-time password = \"%s\"\n", cfg.otp);
 

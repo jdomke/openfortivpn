@@ -58,7 +58,7 @@ const char *xml_find(char t, const char *needle, const char *buf, int nest)
 
 /*
  * Poor man's XML attribute parser. Takes the first string as a quoting
- * character and consumes characters until the next occurence or an end
+ * character and consumes characters until the next occurrence or an end
  * of the buffer. Doesn't return more than 15 characters (enough for an
  * IPv4 address textural form).
  *
@@ -68,7 +68,7 @@ const char *xml_find(char t, const char *needle, const char *buf, int nest)
  */
 char *xml_get(const char *buf)
 {
-	char val[16];	// Just enough to hold an IPv4 address
+	char val[MAX_DOMAIN_LENGTH]; // just enough to hold a domain search string
 	char quote;
 	int i;
 
@@ -82,7 +82,7 @@ char *xml_get(const char *buf)
 	for (i = 1; buf[i]; i++) {
 		if (buf[i] == quote)
 			break;
-		if (i == 16) {
+		if (i == MAX_DOMAIN_LENGTH) {
 			log_warn("Value too long in config XML\n");
 			break;
 		}

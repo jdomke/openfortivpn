@@ -19,6 +19,7 @@
 #include "tunnel.h"
 #include "config.h"
 #include "log.h"
+#include "xml.h"
 
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
@@ -121,6 +122,26 @@ static int ipv4_get_route(struct rtentry *route)
 	uint32_t rtdest, rtmask, rtgtw;
 	int rtfound = 0;
 
+	/*
+	 * initialize the buffer with zeroes, aiming to address the
+	 * coverity issue "TAINTED_SCALAR passed to a tainted sink"
+	 *
+	 * Later on, the routing table is read into this buffer using
+	 * read() and therefore the content of the buffer is considered
+	 * tainted. strtok_r internally uses it in a loop boundary.
+	 * The theoretical problem is that the loop could iterate forever,
+	 * if the buffer contains a huge string which doesn't contain
+	 * the token character, which we are parsing for.
+	 *
+	 * We can declare this as a false positive, because
+	 * - the routing table is to some extent trusted input,
+	 * - it's not that large,
+	 * - and the loop in strtok_r increments the pointer in each
+	 *   interation until it reaches the area where we have ensured
+	 *   that there is a delimiting '\0' character by proper
+	 *   initialization. We ensure this also when growing the buffer.
+	 */
+	memset(buffer, '\0', IPV4_GET_ROUTE_BUFFER_CHUNK_SIZE);
 	log_debug("ip route show %s\n", ipv4_show_route(route));
 
 	// store what we are looking for
@@ -128,14 +149,13 @@ static int ipv4_get_route(struct rtentry *route)
 	rtmask = route_mask(route).s_addr;
 	rtgtw = route_gtw(route).s_addr;
 
-
 	// initialize the output record
 	route_dest(route).s_addr = inet_addr("0.0.0.0");
 	route_mask(route).s_addr = inet_addr("0.0.0.0");
 	route_gtw(route).s_addr = inet_addr("0.0.0.0");
 
 #if HAVE_PROC_NET_ROUTE
-	/* this is not present on Mac OSX and FreeBSD */
+	/* this is not present on Mac OS X and FreeBSD */
 	int fd;
 	uint32_t total_bytes_read = 0;
 
@@ -147,9 +167,8 @@ static int ipv4_get_route(struct rtentry *route)
 	}
 
 	int bytes_read;
-	while ((bytes_read = read(
-	                             fd, buffer + total_bytes_read,
-	                             buffer_size - total_bytes_read - 1)) > 0) {
+	while ((bytes_read = read(fd, buffer + total_bytes_read,
+	                          buffer_size - total_bytes_read - 1)) > 0) {
 		total_bytes_read += bytes_read;
 
 		if ((buffer_size - total_bytes_read) < 1) {
@@ -160,12 +179,16 @@ static int ipv4_get_route(struct rtentry *route)
 				buffer = realloc_buffer;
 			} else {
 				err = ERR_IPV4_SEE_ERRNO;
-				goto end;
+				goto cleanup;
 			}
+			buffer[buffer_size-1] = '\0';
 		}
 	}
 
+cleanup:
 	close(fd);
+	if (err)
+		goto end;
 
 	if (bytes_read < 0) {
 		err = ERR_IPV4_SEE_ERRNO;
@@ -208,13 +231,17 @@ static int ipv4_get_route(struct rtentry *route)
 				buffer = realloc_buffer;
 			} else {
 				err = ERR_IPV4_SEE_ERRNO;
-				goto end;
+				goto cleanup;
 			}
 		}
 
 		line = buffer + total_bytes_read;
 	}
+
+cleanup:
 	pclose(fp);
+	if (err)
+		goto end;
 
 	// reserve enough memory (256 shorts)
 	// to make sure not to access out of bounds later,
@@ -232,7 +259,7 @@ static int ipv4_get_route(struct rtentry *route)
 	 * Also, not all flags might be allowed in the context
 	 * of ipv4, and the code depends on which ones are
 	 * actually implemented on the target platform, which
-	 * might also be varying between OSX versions.
+	 * might also be varying between Mac OS X versions.
 	 *
 	 */
 
@@ -322,9 +349,11 @@ static int ipv4_get_route(struct rtentry *route)
 	start++;
 
 #if !HAVE_PROC_NET_ROUTE
-	if (strstr(buffer, "Ref") != NULL) have_ref = 1;
-	if (strstr(buffer, "Use") != NULL) have_use = 1;
-	// Skip 3 more lines from netstat output on Mac OSX and on FreeBSD
+	if (strstr(buffer, "Ref") != NULL)
+		have_ref = 1;
+	if (strstr(buffer, "Use") != NULL)
+		have_use = 1;
+	// Skip 3 more lines from netstat output on Mac OS X and on FreeBSD
 	start = index(start, '\n');
 	start = index(++start, '\n');
 	start = index(++start, '\n');
@@ -334,6 +363,12 @@ static int ipv4_get_route(struct rtentry *route)
 		goto end;
 	}
 #endif
+
+	if (index(start, '\n') == NULL) {
+		log_debug("routing table is malformed.\n");
+		err = ERR_IPV4_PROC_NET_ROUTE;
+		goto end;
+	}
 
 	// Look for the route
 	line = strtok_r(start, "\n", &saveptr1);
@@ -358,12 +393,13 @@ static int ipv4_get_route(struct rtentry *route)
 		window = strtoul(strtok_r(NULL, "\t", &saveptr2), NULL, 16);
 		irtt = strtoul(strtok_r(NULL, "\t", &saveptr2), NULL, 16);
 #else
-		/* parse netstat output on Mac OSX and BSD */
+		/* parse netstat output on Mac OS X and BSD */
 		char tmp_ip_string[16];
 		struct in_addr dstaddr;
 		int pos;
 		char *tmpstr;
 
+		log_debug_details("\n");
 		log_debug_details("line: %s\n", line);
 
 		saveptr3 = NULL;
@@ -423,6 +459,11 @@ static int ipv4_get_route(struct rtentry *route)
 				// convert from CIDR to ipv4 mask
 				mask = 0xffffffff << (32-((dot_count + 1) * 8));
 			}
+			// convert mask to reversed byte order
+			mask = ((mask & 0xff000000) >> 24)
+			       | ((mask & 0xff0000) >> 8)
+			       | ((mask & 0xff00) << 8)
+			       | ((mask & 0xff) << 24);
 
 		}
 		log_debug_details("- Destination IP Hex: %x\n", dest);
@@ -440,12 +481,13 @@ static int ipv4_get_route(struct rtentry *route)
 		for (pos = 0; pos < strlen(tmpstr); pos++)
 			flags |= flag_table[(unsigned char)tmpstr[pos]];
 
-		if (have_ref) strtok_r(NULL, " ", &saveptr2); // "Ref"
-		if (have_use) strtok_r(NULL, " ", &saveptr2); // "Use"
+		if (have_ref)
+			strtok_r(NULL, " ", &saveptr2); // "Ref"
+		if (have_use)
+			strtok_r(NULL, " ", &saveptr2); // "Use"
 
 		iface = strtok_r(NULL, " ", &saveptr2); // "Netif"
 		log_debug_details("- Interface: %s\n", iface);
-		log_debug_details("\n");
 #endif
 		/*
 		 * Now that we have parsed a routing entry, check if it
@@ -471,7 +513,7 @@ static int ipv4_get_route(struct rtentry *route)
 		 * when the mask is at least as large as the one we may
 		 * have already found in a previous iteration (a larger
 		 * netmask corresponds to a smaller network in this
-		 * representation, and has a higher prority by default).
+		 * representation, and has a higher priority by default).
 		 * Also, only consider routing entries for which the
 		 * netmask is not larger than the netmask used in the
 		 * argument when calling the function - so that we can
@@ -509,8 +551,10 @@ static int ipv4_get_route(struct rtentry *route)
 
 				free(route_iface(route));
 				route_iface(route) = strdup(iface);
-				if (!route_iface(route))
-					return ERR_IPV4_NO_MEM;
+				if (!route_iface(route)) {
+					err = ERR_IPV4_NO_MEM;
+					goto end;
+				}
 
 #if HAVE_PROC_NET_ROUTE
 				// we do not have these values from Mac OS X netstat,
@@ -520,13 +564,15 @@ static int ipv4_get_route(struct rtentry *route)
 				route->rt_window = window;
 				route->rt_irtt = irtt;
 			}
+#else
+				log_debug_details("- route matches\n");
 #endif
 		}
 		line = strtok_r(NULL, "\n", &saveptr1);
 	}
+
 end:
 	free(buffer);
-
 	if (err)
 		return err;
 
@@ -567,7 +613,6 @@ static int ipv4_set_route(struct rtentry *route)
 		log_error("/sbin/route: %s.\n", strerror(errno));
 		return 1;
 	}
-
 
 	strcpy(cmd, "/sbin/route -n add ");
 	if (route->rt_flags & RTF_HOST)
@@ -630,7 +675,6 @@ static int ipv4_del_route(struct rtentry *route)
 		log_error("/sbin/route: %s.\n", strerror(errno));
 		return 1;
 	}
-
 
 	strcpy(cmd, "/sbin/route -n delete ");
 	if (route->rt_flags & RTF_HOST)
@@ -729,7 +773,6 @@ err_destroy:
 	tunnel->ipv4.route_to_vpn_is_added = 0;
 	return ret;
 }
-
 
 #if HAVE_USR_SBIN_PPPD
 static void add_text_route(struct tunnel *tunnel, const char *dest,
@@ -969,12 +1012,18 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 	FILE *file;
 	struct stat stat;
 	char ns1[28], ns2[28]; // 11 + 15 + 1 + 1
+	char dns_suffix[MAX_DOMAIN_LENGTH+8];  // 7 + MAX_DOMAIN_LENGTH + 1
 	char *buffer;
 
-	tunnel->ipv4.ns_are_new = 1;
+	tunnel->ipv4.ns1_was_there = 0;
+	tunnel->ipv4.ns2_was_there = 0;
+	tunnel->ipv4.dns_suffix_was_there = 0;
 
 	if (tunnel->ipv4.ns1_addr.s_addr == 0)
-		return 1;
+		tunnel->ipv4.ns1_was_there = -1;
+
+	if (tunnel->ipv4.ns2_addr.s_addr == 0)
+		tunnel->ipv4.ns2_was_there = -1;
 
 	file = fopen("/etc/resolv.conf", "r+");
 	if (file == NULL) {
@@ -1010,8 +1059,13 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 
 	buffer[stat.st_size] = '\0';
 
-	strcpy(ns1, "nameserver ");
-	strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
+	if (tunnel->ipv4.ns1_addr.s_addr != 0) {
+		strcpy(ns1, "nameserver ");
+		strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
+	} else {
+		ns1[0] = '\0';
+	}
+
 	if (tunnel->ipv4.ns2_addr.s_addr != 0) {
 		strcpy(ns2, "nameserver ");
 		strncat(ns2, inet_ntoa(tunnel->ipv4.ns2_addr), 15);
@@ -1019,18 +1073,52 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 		ns2[0] = '\0';
 	}
 
+	if (tunnel->ipv4.dns_suffix != NULL) {
+		strcpy(dns_suffix, "search ");
+		strncat(dns_suffix, tunnel->ipv4.dns_suffix, MAX_DOMAIN_LENGTH);
+	} else {
+		dns_suffix[0] = '\0';
+	}
+
 	for (const char *line = strtok(buffer, "\n");
 	     line != NULL;
 	     line = strtok(NULL, "\n")) {
 		if (strcmp(line, ns1) == 0) {
-			tunnel->ipv4.ns_are_new = 0;
-			log_debug("Nameservers already present in /etc/resolv.conf.\n");
-			ret = 0;
-			goto err_free;
+			tunnel->ipv4.ns1_was_there = 1;
+			log_debug("ns1 already present in /etc/resolv.conf.\n");
 		}
 	}
 
-	log_debug("Adding \"%s\" and \"%s\" to /etc/resolv.conf.\n", ns1, ns2);
+	if (tunnel->ipv4.ns1_was_there == 0)
+		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns1);
+
+	for (const char *line = strtok(buffer, "\n");
+	     line != NULL;
+	     line = strtok(NULL, "\n")) {
+		if (strcmp(line, ns2) == 0) {
+			tunnel->ipv4.ns2_was_there = 1;
+			log_debug("ns2 already present in /etc/resolv.conf.\n");
+		}
+	}
+
+	if (tunnel->ipv4.ns2_was_there == 0)
+		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", ns2);
+
+	if (dns_suffix[0] == '\0') {
+		tunnel->ipv4.dns_suffix_was_there = -1;
+	} else {
+		for (const char *line = strtok(buffer, "\n");
+		     line != NULL;
+		     line = strtok(NULL, "\n")) {
+			if (dns_suffix[0] != '\0' && strcmp(line, dns_suffix) == 0) {
+				tunnel->ipv4.dns_suffix_was_there = 1;
+				log_debug("dns_suffix already present in /etc/resolv.conf.\n");
+			}
+		}
+	}
+
+	if (tunnel->ipv4.dns_suffix_was_there == 0)
+		log_debug("Adding \"%s\", to /etc/resolv.conf.\n", dns_suffix);
 
 	rewind(file);
 	if (fread(buffer, stat.st_size, 1, file) != 1) {
@@ -1041,11 +1129,17 @@ int ipv4_add_nameservers_to_resolv_conf(struct tunnel *tunnel)
 	buffer[stat.st_size] = '\0';
 
 	rewind(file);
-	strcat(ns1, "\n");
-	fputs(ns1, file);
-	if (tunnel->ipv4.ns2_addr.s_addr != 0) {
+	if (tunnel->ipv4.ns1_was_there == 0) {
+		strcat(ns1, "\n");
+		fputs(ns1, file);
+	}
+	if (tunnel->ipv4.ns2_was_there == 0) {
 		strcat(ns2, "\n");
 		fputs(ns2, file);
+	}
+	if (tunnel->ipv4.dns_suffix_was_there == 0) {
+		strcat(dns_suffix, "\n");
+		fputs(dns_suffix, file);
 	}
 	fwrite(buffer, stat.st_size, 1, file);
 
@@ -1065,15 +1159,8 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 	FILE *file;
 	struct stat stat;
 	char ns1[27], ns2[27]; // 11 + 15 + 1
+	char dns_suffix[MAX_DOMAIN_LENGTH+8];  // 7 + MAX_DOMAIN_LENGTH + 1
 	char *buffer;
-
-	// If nameservers were already there before setting up tunnel,
-	// don't delete them from /etc/resolv.conf
-	if (!tunnel->ipv4.ns_are_new)
-		return 0;
-
-	if (tunnel->ipv4.ns1_addr.s_addr == 0)
-		return 1;
 
 	file = fopen("/etc/resolv.conf", "r+");
 	if (file == NULL) {
@@ -1103,10 +1190,21 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 
 	buffer[stat.st_size] = '\0';
 
-	strcpy(ns1, "nameserver ");
-	strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
-	strcpy(ns2, "nameserver ");
-	strncat(ns2, inet_ntoa(tunnel->ipv4.ns2_addr), 15);
+	ns1[0]='\0';
+	if (tunnel->ipv4.ns1_addr.s_addr != 0) {
+		strcpy(ns1, "nameserver ");
+		strncat(ns1, inet_ntoa(tunnel->ipv4.ns1_addr), 15);
+	}
+	ns2[0]='\0';
+	if (tunnel->ipv4.ns2_addr.s_addr != 0) {
+		strcpy(ns2, "nameserver ");
+		strncat(ns2, inet_ntoa(tunnel->ipv4.ns2_addr), 15);
+	}
+	dns_suffix[0]='\0';
+	if (tunnel->ipv4.dns_suffix != NULL && tunnel->ipv4.dns_suffix[0]!='\0') {
+		strcpy(dns_suffix, "search ");
+		strncat(dns_suffix, tunnel->ipv4.dns_suffix, MAX_DOMAIN_LENGTH);
+	}
 
 	file = freopen("/etc/resolv.conf", "w", file);
 	if (file == NULL) {
@@ -1118,10 +1216,15 @@ int ipv4_del_nameservers_from_resolv_conf(struct tunnel *tunnel)
 	for (const char *line = strtok(buffer, "\n");
 	     line != NULL;
 	     line = strtok(NULL, "\n")) {
-		if (strcmp(line, ns1) == 0) {
+		if (ns1[0]!='\0' && strcmp(line, ns1) == 0
+		    && (tunnel->ipv4.ns1_was_there == 0)) {
 			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", ns1);
-		} else if (strcmp(line, ns2) == 0) {
+		} else if (ns2[0]!='\0' && strcmp(line, ns2) == 0
+		           && (tunnel->ipv4.ns2_was_there == 0)) {
 			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", ns2);
+		} else if (dns_suffix[0]!='\0' && strcmp(line, dns_suffix) == 0
+		           && (tunnel->ipv4.dns_suffix_was_there == 0)) {
+			log_debug("Deleting \"%s\" from /etc/resolv.conf.\n", dns_suffix);
 		} else {
 			fputs(line, file);
 			fputs("\n", file);
